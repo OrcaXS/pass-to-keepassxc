@@ -49,6 +49,10 @@ class KeepassXCEntry:
                         <Key>UserName</Key>
                         <Value></Value>
                 </String>
+                <String>
+                        <Key>otp</Key>
+                        <Value ProtectInMemory="True"></Value>
+                </String>
                 <AutoType>
                         <Enabled>True</Enabled>
                         <DataTransferObfuscation>0</DataTransferObfuscation>
@@ -59,13 +63,14 @@ class KeepassXCEntry:
     """
 
 
-    def __init__(self, username, password, url, title, notes=''):
+    def __init__(self, username, password, url, title, notes='', totp=''):
         self.root = ET.Element('Entry')
         self.add_string_field('Notes', notes)
         self.add_string_field('UserName', username)
         self.add_string_field('Password', password)
         self.add_string_field('URL', url)
         self.add_string_field('Title', title)
+        self.add_string_field('otp', totp)
         self.add_auto_type()
         
 
@@ -141,8 +146,19 @@ class KeepassXCGroup:
 def parse_pass_format(src: str):
     it = src.split('\n')
     password = it[0]
+    totp = next((x for x in it if x.startswith('otpauth://')), None)
+    if type(totp) is str:
+        it.remove(totp)
+    username = next((x for x in it if x.startswith('login:')), None)
+    if type(username) is str:
+        it.remove(username)
+        username = username.removeprefix('login:').strip()
+    url = next((x for x in it if x.startswith('url:')), None)
+    if type(url) is str:
+        it.remove(url)
+        url = url.removeprefix('url:').strip()
     notes = '\n'.join(it[1:])
-    return (password, notes)
+    return (password, notes, totp, username, url)
 
 
 def find_files(directory: Path):
@@ -163,19 +179,33 @@ if __name__ == '__main__':
         sys.exit(1)
     password_store_dir = Path(sys.argv[1])
     out = KeepassXCDump()
-    # treat a subdirectory as a keeepassxc 'group'
-    for group in (x for x in password_store_dir.iterdir() if x.is_dir() and x.name[0] != '.'):
-        keepassxc_entries: List[KeepassXCEntry] = []
-        for entry in find_files(group):
-            url = f"https://{entry.parent.name}"
-            username = re.split(r'\..*?$', entry.name)[0]
+    for group in (x for x in password_store_dir.iterdir() if x.name[0] != '.'):
+        # treat a subdirectory as a keeepassxc 'group'
+        if group.is_dir():
+            keepassxc_entries: List[KeepassXCEntry] = []
+            for entry in find_files(group):
+                parent_name = f"{entry.parent.name}"
+                username = entry.name.removesuffix('.gpg')
+                try:
+                    file_contents = decrypt(entry)
+                except UnicodeDecodeError:
+                    # not UTF-8; skip it
+                    continue
+                password, notes, totp, _, url_parsed = parse_pass_format(file_contents)
+                url = url_parsed or parent_name
+                keepassxc_entries.append(KeepassXCEntry(username=username, password=password, url=url, title=username, notes=notes, totp=totp))
+            out.add_group(group.name.removesuffix('.gpg'), keepassxc_entries)
+        elif group.is_file():
+            keepassxc_entries: List[KeepassXCEntry] = []
+            filename = group.name.removesuffix('.gpg')
             try:
-                file_contents = decrypt(entry)
+                file_contents = decrypt(group)
             except UnicodeDecodeError:
                 # not UTF-8; skip it
                 continue
-            password, notes = parse_pass_format(file_contents)
-            keepassxc_entries.append(KeepassXCEntry(username=username, password=password, url=url, title=username, notes=notes))
-        out.add_group(group.name, keepassxc_entries)
+            password, notes, totp, username, url_parsed = parse_pass_format(file_contents)
+            url = url_parsed or filename
+            keepassxc_entries.append(KeepassXCEntry(username=username, password=password, url=url, title=username, notes=notes, totp=totp))
+            out.add_group(group.name.removesuffix('.gpg'), keepassxc_entries)
     print(out)
     sys.exit(0)
